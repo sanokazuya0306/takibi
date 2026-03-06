@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>takibi</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #fff;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #canvas {
+    position: relative;
+    width: 90vw;
+    height: 80vh;
+    max-width: 900px;
+    max-height: 700px;
+    overflow: hidden;
+  }
+  .letter {
+    position: absolute;
+  }
+  .letter img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+  }
+  #refresh {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    background: #f0f0f0;
+    border: 1px solid #ddd;
+    border-radius: 50%;
+    color: #999;
+    font-size: 18px;
+    cursor: pointer;
+    opacity: 0.5;
+    transition: opacity 0.3s;
+    font-family: system-ui, sans-serif;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #refresh:hover { opacity: 0.9; }
+</style>
+</head>
+<body>
+<div id="canvas"></div>
+<button id="refresh" onclick="rearrange()">↻</button>
+<script>
+const letters = [
+  { src: 'img/t.png', row: 0, order: 0 },
+  { src: 'img/a.png', row: 0, order: 1 },
+  { src: 'img/k.png', row: 1, order: 0 },
+  { src: 'img/i.png', row: 1, order: 1 },
+  { src: 'img/b.png', row: 1, order: 2 },
+  { src: 'img/i.png', row: 1, order: 3 },
+];
+
+// Approximate glyph bounding box within image (ratio of image size)
+// Glyphs are roughly centered, taking ~55-65% of the image
+const glyphRatio = 0.58;
+
+const canvas = document.getElementById('canvas');
+const els = [];
+
+letters.forEach((l, idx) => {
+  const div = document.createElement('div');
+  div.className = 'letter';
+  const img = document.createElement('img');
+  img.src = l.src;
+  div.appendChild(img);
+  canvas.appendChild(div);
+  els.push({ el: div, ...l });
+});
+
+function rand(min, max) {
+  return min + Math.random() * (max - min);
+}
+
+const bases = [];
+
+// Check if two glyph centers are too close (black parts would overlap)
+function glyphsOverlap(x1, y1, x2, y2, size) {
+  const glyphSize = size * glyphRatio;
+  const minDist = glyphSize * 0.85; // minimum distance between glyph centers
+  const dx = (x1 + size/2) - (x2 + size/2);
+  const dy = (y1 + size/2) - (y2 + size/2);
+  return Math.sqrt(dx*dx + dy*dy) < minDist;
+}
+
+function arrange() {
+  const cw = canvas.clientWidth;
+  const ch = canvas.clientHeight;
+  const cx = cw / 2;
+  const size = Math.min(cw * 0.32, 220);
+  const step = size * 0.55;
+  const stepBot = size * 0.47; // bottom row tighter
+
+  bases.length = 0;
+  const placed = []; // track placed positions for collision
+
+  letters.forEach((l, idx) => {
+    const el = els[idx].el;
+    el.style.width = size + 'px';
+    el.style.height = size + 'px';
+
+    let x, y, angle;
+    let attempts = 0;
+    const maxAttempts = 50;
+
+    do {
+      if (l.row === 0) {
+        const count = 2;
+        const rowW = step * (count - 1) + size;
+        const startX = cx - rowW / 2 - size * 0.1;
+        x = startX + l.order * step + rand(-size * 0.08, size * 0.08);
+        y = ch * 0.18 + rand(-size * 0.12, size * 0.12);
+      } else {
+        const count = 4;
+        const rowW = stepBot * (count - 1) + size;
+        const startX = cx - rowW / 2 + size * 0.08;
+        x = startX + l.order * stepBot + rand(-size * 0.06, size * 0.06);
+        y = ch * 0.18 + size * 0.85 + rand(-size * 0.1, size * 0.1);
+      }
+      attempts++;
+    } while (
+      attempts < maxAttempts &&
+      placed.some(p => glyphsOverlap(x, y, p.x, p.y, size))
+    );
+
+    placed.push({ x, y });
+
+    const letterCx = x + size / 2;
+    const distRatio = (letterCx - cx) / (cw / 2);
+    angle = -distRatio * rand(15, 35) + rand(-12, 12);
+
+    bases[idx] = { x, y, angle };
+    el.style.left = x + 'px';
+    el.style.top = y + 'px';
+    el.style.transform = `rotate(${angle.toFixed(1)}deg)`;
+  });
+}
+
+// Flicker: gentle campfire movement
+function flicker() {
+  const now = performance.now();
+  bases.forEach((b, idx) => {
+    if (!b) return;
+    const el = els[idx].el;
+    const phase = idx * 1.3;
+    const dx = Math.sin(now * 0.0012 + phase) * 1.8 + Math.sin(now * 0.0029 + phase * 0.7) * 0.8;
+    const dy = Math.cos(now * 0.0015 + phase * 1.2) * 1.5 + Math.sin(now * 0.0022 + phase) * 0.6;
+    const da = Math.sin(now * 0.001 + phase * 0.9) * 1.2;
+
+    el.style.left = (b.x + dx) + 'px';
+    el.style.top = (b.y + dy) + 'px';
+    el.style.transform = `rotate(${(b.angle + da).toFixed(1)}deg)`;
+  });
+  requestAnimationFrame(flicker);
+}
+
+function rearrange() {
+  arrange();
+}
+
+arrange();
+requestAnimationFrame(flicker);
+window.addEventListener('resize', arrange);
+</script>
+</body>
+</html>
