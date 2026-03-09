@@ -102,9 +102,9 @@ function arrange() {
   const cw = canvas.clientWidth;
   const ch = canvas.clientHeight;
   const cx = cw / 2;
-  const size = Math.min(cw * 0.32, 220);
-  const step = size * 0.55;
-  const stepBot = size * 0.47; // bottom row tighter
+  const cy = ch / 2;
+  const size = Math.min(cw * 0.28, 180);
+  const spread = size * 0.55; // how far from center letters can scatter
 
   bases.length = 0;
   const placed = []; // track placed positions for collision
@@ -116,22 +116,12 @@ function arrange() {
 
     let x, y, angle;
     let attempts = 0;
-    const maxAttempts = 50;
+    const maxAttempts = 80;
 
     do {
-      if (l.row === 0) {
-        const count = 2;
-        const rowW = step * (count - 1) + size;
-        const startX = cx - rowW / 2 - size * 0.1;
-        x = startX + l.order * step + rand(-size * 0.08, size * 0.08);
-        y = ch * 0.18 + rand(-size * 0.12, size * 0.12);
-      } else {
-        const count = 4;
-        const rowW = stepBot * (count - 1) + size;
-        const startX = cx - rowW / 2 + size * 0.08;
-        x = startX + l.order * stepBot + rand(-size * 0.06, size * 0.06);
-        y = ch * 0.18 + size * 0.85 + rand(-size * 0.1, size * 0.1);
-      }
+      // scatter randomly around center
+      x = cx - size / 2 + rand(-spread, spread);
+      y = cy - size / 2 + rand(-spread * 0.7, spread * 0.7);
       attempts++;
     } while (
       attempts < maxAttempts &&
@@ -140,9 +130,7 @@ function arrange() {
 
     placed.push({ x, y });
 
-    const letterCx = x + size / 2;
-    const distRatio = (letterCx - cx) / (cw / 2);
-    angle = -distRatio * rand(15, 35) + rand(-12, 12);
+    angle = rand(-25, 25);
 
     bases[idx] = { x, y, angle };
     el.style.left = x + 'px';
