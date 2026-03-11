@@ -20,21 +20,19 @@
     height: 80vh;
     max-width: 900px;
     max-height: 700px;
-    overflow: hidden;
   }
   .letter {
     position: absolute;
+    transform-origin: 50% 50%;
   }
   .letter img {
-    width: 100%;
-    height: 100%;
+    width: 100%; height: 100%;
     object-fit: contain;
     display: block;
   }
   #refresh {
     position: fixed;
-    bottom: 16px;
-    right: 16px;
+    bottom: 16px; right: 16px;
     background: #f0f0f0;
     border: 1px solid #ddd;
     border-radius: 50%;
@@ -44,126 +42,316 @@
     opacity: 0.5;
     transition: opacity 0.3s;
     font-family: system-ui, sans-serif;
-    width: 32px;
-    height: 32px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    width: 32px; height: 32px;
+    display: flex; align-items: center; justify-content: center;
   }
   #refresh:hover { opacity: 0.9; }
 </style>
 </head>
 <body>
 <div id="canvas"></div>
-<button id="refresh" onclick="rearrange()">↻</button>
-<script>
-const letters = [
-  { src: 'img/t.png', row: 0, order: 0 },
-  { src: 'img/a.png', row: 0, order: 1 },
-  { src: 'img/k.png', row: 1, order: 0 },
-  { src: 'img/i.png', row: 1, order: 1 },
-  { src: 'img/b.png', row: 1, order: 2 },
-  { src: 'img/i.png', row: 1, order: 3 },
-];
+<button id="refresh" onclick="triggerShuffle()">↻</button>
 
-// Approximate glyph bounding box within image (ratio of image size)
-// Glyphs are roughly centered, taking ~55-65% of the image
-const glyphRatio = 0.58;
+<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+<script>
+const letterData = [
+  { src: 'img/t.png' },
+  { src: 'img/a.png' },
+  { src: 'img/k.png' },
+  { src: 'img/i.png' },
+  { src: 'img/b.png' },
+  { src: 'img/i.png' },
+];
 
 const canvas = document.getElementById('canvas');
 const els = [];
-
-letters.forEach((l, idx) => {
+letterData.forEach(l => {
   const div = document.createElement('div');
   div.className = 'letter';
   const img = document.createElement('img');
   img.src = l.src;
   div.appendChild(img);
   canvas.appendChild(div);
-  els.push({ el: div, ...l });
+  els.push({ el: div });
 });
 
-function rand(min, max) {
-  return min + Math.random() * (max - min);
+const rand = (a, b) => a + Math.random() * (b - a);
+const easeOut   = t => 1 - Math.pow(1 - t, 2.5);
+const easeInOut = t => t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3)/2;
+
+let bases        = [];
+let animRunning  = false;
+let physicsActive = false;
+let flickerEnabled = false;  // 最初のラインは静止
+let autoTimer    = null;
+let glyphData    = [];  // per-letter pixel analysis
+
+const getSize = () => Math.min(canvas.clientWidth * 0.14, 126);
+
+function setSize(s) {
+  els.forEach(({ el }) => { el.style.width = s + 'px'; el.style.height = s + 'px'; });
 }
 
-const bases = [];
-
-// Check if two glyph centers are too close (black parts would overlap)
-function glyphsOverlap(x1, y1, x2, y2, size) {
-  const glyphSize = size * glyphRatio;
-  const minDist = glyphSize * 0.85; // minimum distance between glyph centers
-  const dx = (x1 + size/2) - (x2 + size/2);
-  const dy = (y1 + size/2) - (y2 + size/2);
-  return Math.sqrt(dx*dx + dy*dy) < minDist;
+function snap(positions) {
+  positions.forEach((p, i) => {
+    els[i].el.style.left      = p.x + 'px';
+    els[i].el.style.top       = p.y + 'px';
+    els[i].el.style.transform = `rotate(${(p.angle||0).toFixed(2)}deg)`;
+    bases[i] = { x: p.x, y: p.y, angle: p.angle||0 };
+  });
 }
 
-function arrange() {
-  const cw = canvas.clientWidth;
-  const ch = canvas.clientHeight;
-  const cx = cw / 2;
-  const cy = ch / 2;
-  const size = Math.min(cw * 0.28, 180);
-  const spread = size * 0.55; // how far from center letters can scatter
+// ── Pixel analysis (runs once at load) ───────────────────────────────────────
+// Scans each letter image for dark pixels → glyph bbox + black pixel count
+async function analyzeGlyph(src) {
+  try {
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = src; });
+    const oc  = document.createElement('canvas');
+    const ctx = oc.getContext('2d');
+    oc.width  = img.naturalWidth  || 200;
+    oc.height = img.naturalHeight || 200;
+    ctx.drawImage(img, 0, 0);
+    const { data, width, height } = ctx.getImageData(0, 0, oc.width, oc.height);
+    let count = 0, x0 = width, x1 = 0, y0 = height, y1 = 0;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = (y * width + x) * 4;
+        if (data[i+3] > 100 && data[i] < 110 && data[i+1] < 110 && data[i+2] < 110) {
+          count++;
+          if (x < x0) x0 = x; if (x > x1) x1 = x;
+          if (y < y0) y0 = y; if (y > y1) y1 = y;
+        }
+      }
+    }
+    if (!count) throw 0;
+    return { count, gx: x0/width, gy: y0/height, gw: (x1-x0)/width, gh: (y1-y0)/height };
+  } catch {
+    return { count: 4800, gx: 0.21, gy: 0.21, gw: 0.58, gh: 0.58 };
+  }
+}
 
-  bases.length = 0;
-  const placed = []; // track placed positions for collision
+// ── Layouts ───────────────────────────────────────────────────────────────────
+// Initial line: glyph-aware spacing so black parts are snug like a real wordmark.
+// Uses pixel analysis (glyphData) to position by glyph edge, not image box edge.
+function buildLine() {
+  const cw = canvas.clientWidth, ch = canvas.clientHeight;
+  const size = getSize();
+  const n    = letterData.length;
+  const y    = (ch - size) / 2;
+  const visualGap = size * 0.025; // gap between adjacent glyph edges
 
-  letters.forEach((l, idx) => {
-    const el = els[idx].el;
-    el.style.width = size + 'px';
-    el.style.height = size + 'px';
+  if (glyphData.length === n) {
+    // Place letters so each glyph's left edge = prev glyph's right edge + visualGap
+    const xs = [0];
+    for (let i = 1; i < n; i++) {
+      const prev = glyphData[i - 1];
+      const cur  = glyphData[i];
+      xs[i] = xs[i-1] + size * (prev.gx + prev.gw) + visualGap - size * cur.gx;
+    }
+    // Total visual (glyph) width
+    const first = glyphData[0], last = glyphData[n-1];
+    const visualW = (xs[n-1] + size * (last.gx + last.gw)) - (xs[0] + size * first.gx);
+    // Offset so the visual block is centered horizontally
+    const ox = (cw - visualW) / 2 - (xs[0] + size * first.gx);
 
-    let x, y, angle;
-    let attempts = 0;
-    const maxAttempts = 80;
+    // Align glyph bottom edges: find common baseline at vertical center
+    const baseline = ch / 2 + size * 0.3; // baseline Y in canvas coords
+    return letterData.map((_, i) => {
+      const g  = glyphData[i];
+      const yi = baseline - size * (g.gy + g.gh); // top of image box so glyph bottom = baseline
+      return { x: xs[i] + ox, y: yi, angle: i === 3 ? 8 : 0 };
+    });
+  } else {
+    // Fallback before glyphData loads
+    const gap   = size * -0.1;
+    const total = n * size + (n - 1) * gap;
+    return letterData.map((_, i) => ({ x: (cw - total) / 2 + i * (size + gap), y, angle: 0 }));
+  }
+}
 
+function buildScatter() {
+  const cw = canvas.clientWidth, ch = canvas.clientHeight, size = getSize();
+  const cx = cw/2 - size/2, cy = ch/2 - size/2;
+  const placed = [];
+  return letterData.map(() => {
+    let x, y, att = 0;
     do {
-      // scatter randomly around center
-      x = cx - size / 2 + rand(-spread, spread);
-      y = cy - size / 2 + rand(-spread * 0.7, spread * 0.7);
-      attempts++;
-    } while (
-      attempts < maxAttempts &&
-      placed.some(p => glyphsOverlap(x, y, p.x, p.y, size))
-    );
-
+      x = cx + rand(-cw * 0.468, cw * 0.468);
+      y = cy + rand(-ch * 0.338, ch * 0.338);
+      att++;
+    } while (att < 120 && placed.some(p => Math.hypot(x-p.x, y-p.y) < size * 0.55));
     placed.push({ x, y });
-
-    angle = rand(-25, 25);
-
-    bases[idx] = { x, y, angle };
-    el.style.left = x + 'px';
-    el.style.top = y + 'px';
-    el.style.transform = `rotate(${angle.toFixed(1)}deg)`;
+    return { x, y, angle: rand(-40, 40) };
   });
 }
 
-// Flicker: gentle campfire movement
-function flicker() {
-  const now = performance.now();
-  bases.forEach((b, idx) => {
-    if (!b) return;
-    const el = els[idx].el;
-    const phase = idx * 1.3;
-    const dx = Math.sin(now * 0.0012 + phase) * 1.8 + Math.sin(now * 0.0029 + phase * 0.7) * 0.8;
-    const dy = Math.cos(now * 0.0015 + phase * 1.2) * 1.5 + Math.sin(now * 0.0022 + phase) * 0.6;
-    const da = Math.sin(now * 0.001 + phase * 0.9) * 1.2;
+// ── Physics: central attractor ────────────────────────────────────────────────
+// Instead of floor gravity, each body is pulled toward the canvas center.
+// Letters spiral inward, collide, and pile up in a cluster at the center.
+function startPhysics() {
+  physicsActive = true;
+  const { Engine, Bodies, Body, World } = Matter;
+  const cw = canvas.clientWidth, ch = canvas.clientHeight, size = getSize();
+  const CX = cw / 2, CY = ch / 2;   // attractor target
 
-    el.style.left = (b.x + dx) + 'px';
-    el.style.top = (b.y + dy) + 'px';
-    el.style.transform = `rotate(${(b.angle + da).toFixed(1)}deg)`;
+  const engine = Engine.create();
+  engine.gravity.y = 0;              // no standard gravity
+
+  // Soft boundary walls so nothing escapes off-screen
+  const walls = [
+    Bodies.rectangle(CX,    -40,   cw*3, 50, { isStatic: true }),
+    Bodies.rectangle(CX,    ch+40, cw*3, 50, { isStatic: true }),
+    Bodies.rectangle(-40,   CY,    50, ch*3, { isStatic: true }),
+    Bodies.rectangle(cw+40, CY,    50, ch*3, { isStatic: true }),
+  ];
+  World.add(engine.world, walls);
+
+  const letterBodies = letterData.map((_, idx) => {
+    const pos = bases[idx];
+    const g   = glyphData[idx] || { count: 4800, gw: 0.58, gh: 0.58 };
+    const body = Bodies.rectangle(
+      pos.x + size/2, pos.y + size/2,   // body center = div center
+      size * g.gw,    size * g.gh,       // body size   = glyph bbox
+      {
+        angle:       pos.angle * Math.PI / 180,
+        mass:        Math.max(0.4, g.count / 5500),  // heavier = more black pixels
+        frictionAir: 0.06,   // air resistance dampens oscillations toward center
+        friction:    0.8,
+        restitution: 0.15,
+      }
+    );
+    Body.setAngularVelocity(body, rand(-0.07, 0.07));
+    return body;
   });
+  World.add(engine.world, letterBodies);
+
+  // 2秒後に強制終了 → その場でsnap → flicker → scatter
+  const stopTimer = setTimeout(() => {
+    physicsActive = false;
+    World.clear(engine.world);
+    Engine.clear(engine);
+    // bases[] は physicsStep が毎フレーム更新しているのでそのまま使える
+    snap(bases.map(b => b));
+    autoTimer = setTimeout(runShuffle, 2500);
+  }, 2000);
+
+  function physicsStep() {
+    if (!physicsActive) return;
+
+    // Central attractor: F = strength * mass * distance (spring-like)
+    const strength = 0.0000032;  // x4
+    letterBodies.forEach(body => {
+      const dx = CX - body.position.x;
+      const dy = CY - body.position.y;
+      Body.applyForce(body, body.position, {
+        x: dx * strength * body.mass,
+        y: dy * strength * body.mass,
+      });
+    });
+
+    Engine.update(engine, 1000 / 60);
+
+    letterBodies.forEach((body, idx) => {
+      const left = body.position.x - size / 2;
+      const top  = body.position.y - size / 2;
+      els[idx].el.style.left      = left + 'px';
+      els[idx].el.style.top       = top  + 'px';
+      els[idx].el.style.transform = `rotate(${body.angle}rad)`;
+      bases[idx] = { x: left, y: top, angle: body.angle * 180 / Math.PI };
+    });
+
+    requestAnimationFrame(physicsStep);
+  }
+
+  requestAnimationFrame(physicsStep);
+}
+
+// ── Walking animation ─────────────────────────────────────────────────────────
+function animateTo(targets, duration, walkIntensity, easeFn, onDone) {
+  if (animRunning) return;
+  animRunning = true;
+  const from = bases.map(b => ({ ...b }));
+  const t0   = performance.now();
+
+  function tick(now) {
+    const t   = Math.min((now - t0) / duration, 1);
+    const e   = easeFn(t);
+    const env = Math.pow(1 - t, 0.55);   // easeOut envelope: strong start, fade at landing
+
+    targets.forEach((tgt, idx) => {
+      const s     = from[idx];
+      const x     = s.x + (tgt.x - s.x) * e;
+      const y     = s.y + (tgt.y - s.y) * e;
+      const angle = s.angle + (tgt.angle - s.angle) * e;
+      const tilt  = Math.sin(now * 0.018 + idx * 2.1) * walkIntensity * env;
+
+      els[idx].el.style.left      = x + 'px';
+      els[idx].el.style.top       = y + 'px';
+      els[idx].el.style.transform = `rotate(${(angle + tilt).toFixed(2)}deg)`;
+      bases[idx] = { x, y, angle };
+    });
+
+    if (t < 1) requestAnimationFrame(tick);
+    else { snap(targets); animRunning = false; if (onDone) onDone(); }
+  }
+  requestAnimationFrame(tick);
+}
+
+// ── Flicker ───────────────────────────────────────────────────────────────────
+function flicker() {
+  if (flickerEnabled && !animRunning && !physicsActive) {
+    const now = performance.now();
+    bases.forEach((b, idx) => {
+      if (!b) return;
+      const ph = idx * 1.3;
+      const dx = Math.sin(now*0.0012+ph)*1.8 + Math.sin(now*0.0029+ph*0.7)*0.8;
+      const dy = Math.cos(now*0.0015+ph*1.2)*1.5 + Math.sin(now*0.0022+ph)*0.6;
+      const da = Math.sin(now*0.001+ph*0.9)*1.2;
+      els[idx].el.style.left      = (b.x + dx) + 'px';
+      els[idx].el.style.top       = (b.y + dy) + 'px';
+      els[idx].el.style.transform = `rotate(${(b.angle + da).toFixed(2)}deg)`;
+    });
+  }
   requestAnimationFrame(flicker);
 }
 
-function rearrange() {
-  arrange();
+// ── Cycle ─────────────────────────────────────────────────────────────────────
+// Scatter (walking) → physics gather to center → settle → flicker 2.5s → repeat
+function runShuffle() {
+  if (animRunning || physicsActive) return;
+  clearTimeout(autoTimer);
+  flickerEnabled = true;  // 最初のシャッフル開始からflicker有効
+  setSize(getSize());
+  animateTo(buildScatter(), 1800, 22, easeOut, () => {
+    setTimeout(startPhysics, 300);
+  });
 }
 
-arrange();
-requestAnimationFrame(flicker);
-window.addEventListener('resize', arrange);
+function triggerShuffle() {
+  clearTimeout(autoTimer);
+  physicsActive = false;
+  animRunning   = false;
+  runShuffle();
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function init() {
+  setSize(getSize());
+  requestAnimationFrame(flicker);
+
+  // 先にpixel解析して正確な間隔で並べる
+  glyphData = await Promise.all(letterData.map(l => analyzeGlyph(l.src)));
+  snap(buildLine());
+
+  autoTimer = setTimeout(runShuffle, 1500);
+}
+
+init();
+
+window.addEventListener('resize', () => {
+  if (!animRunning && !physicsActive) { setSize(getSize()); snap(buildLine()); }
+});
 </script>
 </body>
 </html>
